@@ -101,16 +101,55 @@ python -m venv .venv
 .venv/bin/python app.py
 ```
 
-Chạy như service trên Linux (systemd), tạo `/etc/systemd/system/slack-redmine.service`:
+Chạy trực tiếp như trên chỉ để thử; app phải chạy liên tục (giữ WebSocket tới Slack) nên trên Linux nên chạy như systemd service — xem bên dưới.
+
+<details>
+<summary>Lỗi <code>ensurepip is not available</code> khi tạo venv (Debian/Ubuntu)</summary>
+
+Debian/Ubuntu tách `venv`/`ensurepip` ra gói riêng. Cách chuẩn là cài gói đó (cần root, thay `3.x` bằng version python đang dùng):
+
+```bash
+sudo apt install python3.x-venv
+```
+
+Không có root: tạo venv không kèm pip rồi dùng pip có sẵn ở user site (`~/.local/bin/pip`) cài thẳng vào venv:
+
+```bash
+python3 -m venv --without-pip .venv
+python3 -m pip --python .venv/bin/python install -r requirements.txt
+```
+
+</details>
+
+### Chạy như service (systemd)
+
+Có hai cách, chọn một:
+
+| | System service (`/etc/systemd/system`) | User service (`~/.config/systemd/user`) |
+|---|---|---|
+| Cần root | Có (`sudo`) | Không |
+| Chạy bằng user | Do `User=` trong unit quyết định | Chính user tạo service |
+| Tự chạy khi boot | Có | Có, **nếu đã bật linger** (xem dưới) |
+| Lệnh quản lý | `sudo systemctl ...` | `systemctl --user ...` |
+| Log | `sudo journalctl -u slack-redmine` | `journalctl --user -u slack-redmine` |
+
+Đường dẫn trong các unit file dưới đây là ví dụ, sửa cho đúng nơi đặt repo. `WorkingDirectory` phải là thư mục `slack-redmine` vì app đọc `.env` và `config.json` tương đối theo vị trí `app.py`.
+
+#### Cách 1: system service (server dùng chung, có root)
+
+Tạo `/etc/systemd/system/slack-redmine.service`:
 
 ```ini
 [Unit]
 Description=Slack-Redmine ticket bot
 After=network-online.target
+Wants=network-online.target
 
 [Service]
+User=slackbot
 WorkingDirectory=/opt/batsg-worktool/src/slack-redmine
 ExecStart=/opt/batsg-worktool/src/slack-redmine/.venv/bin/python app.py
+Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=10
 
@@ -119,8 +158,64 @@ WantedBy=multi-user.target
 ```
 
 ```bash
+sudo systemctl daemon-reload
 sudo systemctl enable --now slack-redmine
+sudo systemctl status slack-redmine
 ```
+
+`User=` nên là user không phải root và có quyền đọc thư mục app (chứa `.env` có API key). Bỏ dòng `User=` thì service chạy bằng root — không nên.
+
+#### Cách 2: user service (máy cá nhân / không có root)
+
+Tạo `~/.config/systemd/user/slack-redmine.service`:
+
+```ini
+[Unit]
+Description=Slack-Redmine ticket bot
+After=network.target
+
+[Service]
+WorkingDirectory=%h/dev/batsg-worktool/src/slack-redmine
+ExecStart=%h/dev/batsg-worktool/src/slack-redmine/.venv/bin/python app.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+(`%h` = home directory của user. User unit không dùng được `network-online.target`/`multi-user.target` của system, nên dùng `network.target`/`default.target`.)
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now slack-redmine
+systemctl --user status slack-redmine
+```
+
+**Bắt buộc bật linger**, nếu không service sẽ bị kill khi user logout và không tự chạy khi boot:
+
+```bash
+loginctl enable-linger $USER
+loginctl show-user $USER -p Linger   # phải ra Linger=yes
+```
+
+Lệnh này thường chạy được không cần root khi user có session đang active; nếu bị hỏi xác thực thì chạy với `sudo loginctl enable-linger <user>`.
+
+#### Vận hành
+
+```bash
+systemctl --user restart slack-redmine      # bắt buộc sau khi sửa config.json / .env / app.py
+journalctl --user -u slack-redmine -f       # xem log; thấy "⚡️ Bolt app is running!" là đã kết nối Slack
+```
+
+(Bỏ `--user`, thêm `sudo` nếu dùng cách 1.)
+
+Lưu ý:
+
+- `Restart=always` + `RestartSec=10`: app crash hoặc mất mạng thì systemd tự chạy lại sau 10 giây. Riêng mất mạng tạm thời thì Bolt Socket Mode tự reconnect, không cần restart.
+- Không chạy đồng thời cả system service lẫn user service (hoặc chạy tay `python app.py` khi service đang chạy): Slack phân phối mỗi event tới một trong các kết nối cùng App-Level Token, nên không biết instance nào xử lý — dễ nhầm khi đang sửa code/config mà một instance vẫn chạy bản cũ. Muốn chạy tay để debug thì `stop` service trước.
+- Đổi vị trí repo thì phải sửa lại `WorkingDirectory`/`ExecStart` rồi `daemon-reload` + `restart`.
 
 ## Giới hạn hiện tại (phase 1)
 
