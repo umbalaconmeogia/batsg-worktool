@@ -1,0 +1,9 @@
+# Environment-specific / secret files — never commit
+.env
+src/slack-redmine/config.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
