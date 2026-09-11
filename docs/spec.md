@@ -31,11 +31,25 @@ Pattern tham khảo: GitHub official Slack integration ("⋮ → Create an Issue
 
 4. App post message vào thread của message gốc:
 
-   > Đã tạo Redmine ticket [Tracker #ID: Subject](url) trong project **ProjectName**
+   > [STATUS] [Tracker #ID: Subject](url) — ticket đã được tạo trong project **ProjectName**
+   > (ja: [STATUS] [Tracker #ID: Subject](url) — チケットをプロジェクト **ProjectName** に作成しました)
+
+   - `[STATUS]` = tên status của ticket trên Redmine viết hoa (`[NEW]`, `[IN PROGRESS]`, `[CLOSED]`...), không ánh xạ sang chữ khác. Được cập nhật về sau, xem mục 2b.
 
    - Link dùng cú pháp mrkdwn của Slack `<url|Tracker #ID: Subject>` — hiển thị giống format của [redmine-ticket-copy-markdown](https://github.com/umbalaconmeogia/bookmarklet-collection/tree/main/src/redmine-ticket-copy-markdown).
    - Nếu vừa ghi mapping: thêm đuôi `(đã ghi nhớ project này cho channel)`; nếu channel chưa map và không ghi nhớ: `(channel này chưa được map project)`.
    - Tắt unfurl (không hiện preview link).
+
+## 2b. Theo dõi status ticket
+
+Mục đích: nhìn Slack biết ticket xong chưa, không phải mở Redmine.
+
+- **Ghi nhận**: mỗi message bot post về ticket được ghi vào `posted-messages.csv` (gitignore, app tự maintain): `channel_id`, `ts`, `issue_ids` (`;`-separated), `posted_at`, `statuses` (nhãn đã ghi lần cuối), `body` (phần text sau tiền tố; rỗng = message nhiều ticket, sinh lại từ Redmine). Ghi qua file tạm + `os.replace`, có lock.
+- **Job hằng ngày** (thread trong process, chạy 30s sau khi start rồi mỗi ngày lúc `status_check_time`): với từng dòng chưa quá `status_track_days` ngày, `GET /issues/<id>.json` → nếu chuỗi status khác lần trước thì `chat.update` message với tiền tố mới, giữ nguyên phần thân. Dòng quá hạn, ticket đã xoá (404), message đã xoá (`message_not_found`/`channel_not_found`) → bỏ khỏi file. Không quét Slack history; chỉ những message bot post sau khi có tính năng này mới được theo dõi.
+- **Shortcut "Check Redmine status"** (`callback_id` = `check_redmine_status`, On messages): cập nhật ngay. Tìm mọi link `REDMINE_URL/issues/<id>` trong message.
+  - Message của bot (so `bot_id`/`user` với `auth.test`): `chat.update` tại chỗ, chỉ thay tiền tố.
+  - Message của người: Slack không cho app sửa → bot post một reply trong thread, mỗi ticket một dòng `[STATUS] [Tracker #ID: Subject](url)`. Bấm lại thì cập nhật reply cũ (tìm bằng `conversations.replies`, cần `channels:history`/`groups:history`; thiếu scope thì post reply mới). Reply này cũng được ghi vào `posted-messages.csv` để job hằng ngày theo dõi tiếp.
+  - Không có link → ephemeral báo; lỗi Redmine → ephemeral kèm lý do. Ngôn ngữ: `default_language` (shortcut không có modal).
 
 ## 3. Kiến trúc
 
@@ -75,6 +89,7 @@ Setting tĩnh do người sửa, đọc một lần lúc khởi động (đổi 
 
 - `default_project`: project chọn sẵn khi channel chưa có trong mapping. `null` → ô Project trống, người dùng phải chọn (Slack không cho submit khi input required trống).
 - `default_language` (optional): `vi` hoặc `ja`, giá trị chọn sẵn của ô Reply language trong modal. Không có / không hợp lệ → `vi`.
+- `status_check_time` (optional, `HH:MM` giờ local, mặc định `07:00`), `status_track_days` (optional, mặc định 90): xem mục 2b.
 
 ### `slack-redmine-mapping.csv` (gitignore; có `.example`)
 
@@ -91,7 +106,7 @@ Tương thích ngược: khởi động mà `config.json` có `slack_channel_red
 
 - **Interactivity & Shortcuts**: bật, tạo shortcut loại *On messages*, callback ID `create_redmine_ticket`.
 - **Socket Mode**: bật, tạo App-Level Token scope `connections:write`.
-- **OAuth & Permissions** — bot scopes: `commands`, `chat:write`, `users:read`, `users:read.email`, `im:write`, `channels:read`, `groups:read` → install vào workspace.
+- **OAuth & Permissions** — bot scopes: `commands`, `chat:write`, `users:read`, `users:read.email`, `im:write`, `channels:read`, `groups:read`, `channels:history`, `groups:history` → install vào workspace. Shortcut thứ hai: On messages, callback ID `check_redmine_status`.
 - Bot phải được `/invite` vào channel thì mới post vào thread được.
 
 ## 7. Xử lý lỗi

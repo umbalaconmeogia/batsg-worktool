@@ -13,6 +13,10 @@ features:
       type: message
       callback_id: create_redmine_ticket
       description: Create a Redmine ticket from this message
+    - name: Check Redmine status
+      type: message
+      callback_id: check_redmine_status
+      description: Refresh the [STATUS] of Redmine tickets linked in this message
 oauth_config:
   scopes:
     bot:
@@ -23,6 +27,8 @@ oauth_config:
       - im:write
       - channels:read
       - groups:read
+      - channels:history
+      - groups:history
 settings:
   interactivity:
     is_enabled: true

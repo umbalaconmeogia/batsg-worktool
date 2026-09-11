@@ -14,7 +14,9 @@ See docs/spec.md for the full specification.
 """
 
 import csv
+import datetime as dt
 import json
+import logging
 import os
 import re
 import threading
@@ -25,6 +27,9 @@ import requests
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+
+# Before App() is created: Bolt fixes its logger level at construction time.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 APP_DIR = Path(__file__).parent
 load_dotenv(APP_DIR / ".env")
@@ -40,24 +45,35 @@ with open(CONFIG_PATH, encoding="utf-8") as f:
 
 DEFAULT_PROJECT = _config.get("default_project")
 
+# Status tracking: messages the bot posted get a "[STATUS] " prefix that is
+# refreshed once a day (see "Ticket status tracking" below).
+STATUS_CHECK_TIME = _config.get("status_check_time", "07:00")   # local time, HH:MM
+STATUS_TRACK_DAYS = int(_config.get("status_track_days", 90))   # stop tracking after this
+
 # Language of the messages the bot posts back to Slack. The modal has a
 # selector (last field) whose initial value is this; "vi" if unset/unknown.
 MESSAGES = {
     "vi": {
-        "created": "Đã tạo Redmine ticket {link} trong project *{project}*",
+        "created": "{link} — ticket đã được tạo trong project *{project}*",
         "unmapped": " (channel này chưa được map project)",
         "remembered": " (đã ghi nhớ project này cho channel)",
         "failed": "⚠️ Tạo ticket Redmine thất bại: {error}",
         "not_in_channel": "⚠️ Bot chưa được thêm vào channel <#{channel}> nên không post được vào thread. "
                           "Hãy `/invite @{bot}` vào channel đó.",
+        "no_link": "Message này không có link Redmine ticket ({url}/issues/...).",
+        "status_updated": "Đã cập nhật status: {summary}",
+        "status_failed": "⚠️ Kiểm tra status thất bại: {error}",
     },
     "ja": {
-        "created": "Redmineチケット {link} をプロジェクト *{project}* に作成しました",
+        "created": "{link} — チケットをプロジェクト *{project}* に作成しました",
         "unmapped": "（このチャンネルはプロジェクトにマッピングされていません）",
         "remembered": "（このチャンネルのプロジェクトとして記憶しました）",
         "failed": "⚠️ Redmineチケットの作成に失敗しました: {error}",
         "not_in_channel": "⚠️ Botがチャンネル <#{channel}> に追加されていないため、スレッドに投稿できませんでした。"
                           "そのチャンネルで `/invite @{bot}` してください。",
+        "no_link": "このメッセージにはRedmineチケットのリンク（{url}/issues/...）がありません。",
+        "status_updated": "ステータスを更新しました: {summary}",
+        "status_failed": "⚠️ ステータス確認に失敗しました: {error}",
     },
 }
 LANGUAGE_LABELS = {"vi": "Tiếng Việt", "ja": "日本語"}
@@ -193,6 +209,27 @@ def redmine_error_message(r):
     if errors:
         return "; ".join(errors)
     return f"HTTP {r.status_code} {r.reason}"
+
+
+def get_issue(issue_id):
+    """One issue (id, subject, tracker, status, ...); None if it no longer exists."""
+    try:
+        return redmine_get(f"/issues/{issue_id}.json")["issue"]
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return None
+        raise
+
+
+def issue_link(issue):
+    """Slack mrkdwn link, same visual format as redmine-ticket-copy-markdown:
+    [Tracker #ID: Subject](url)."""
+    tracker = issue.get("tracker", {}).get("name", "Ticket")
+    return f"<{REDMINE_URL}/issues/{issue['id']}|{tracker} #{issue['id']}: {issue['subject']}>"
+
+
+def status_label(issue):
+    return issue.get("status", {}).get("name", "?").upper()
 
 
 def get_projects():
@@ -570,6 +607,136 @@ def notify_user(client, channel_id, user_id, thread_ts, text, msgs):
         )
 
 
+# --- Ticket status tracking ------------------------------------------------
+#
+# Every message the bot posts about tickets is recorded in posted-messages.csv
+# and starts with "[STATUS] ". A daily job re-reads Redmine and edits the
+# message when the status changed, so a glance at Slack tells whether a ticket
+# is done. Slack lets an app edit only its own messages, hence only bot posts
+# are tracked. Rows older than STATUS_TRACK_DAYS are dropped.
+#
+# Columns: channel_id, ts (message timestamp = Slack's message id), issue_ids
+# (";"-separated), posted_at (ISO date), statuses (";"-separated labels last
+# written), body (message text after the prefix; empty = regenerate from
+# Redmine, used for multi-ticket status replies).
+
+POSTED_PATH = APP_DIR / "posted-messages.csv"
+POSTED_FIELDS = ["channel_id", "ts", "issue_ids", "posted_at", "statuses", "body"]
+_posted_lock = threading.Lock()
+_STATUS_PREFIX = re.compile(r"^\[[^\]\n]+\] ")
+# Wording that only "ticket created" messages contain (text between {link} and {project}).
+_CREATED_MARKERS = [m["created"].split("{link}")[1].split("{project}")[0].strip() for m in MESSAGES.values()]
+_ISSUE_URL = re.compile(re.escape(REDMINE_URL) + r"/issues/(\d+)")
+
+
+def _read_posted_rows():
+    if not POSTED_PATH.exists():
+        return []
+    with open(POSTED_PATH, encoding="utf-8", newline="") as f:
+        return [{k: (row.get(k) or "") for k in POSTED_FIELDS} for row in csv.DictReader(f) if row.get("ts")]
+
+
+def _write_posted_rows(rows):
+    tmp = POSTED_PATH.with_suffix(".csv.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=POSTED_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+    os.replace(tmp, POSTED_PATH)
+
+
+def remember_posted(channel_id, ts, issues, body=""):
+    """Record (or refresh) a bot message so the daily job keeps its status prefix current."""
+    row = {
+        "channel_id": channel_id,
+        "ts": ts,
+        "issue_ids": ";".join(str(i["id"]) for i in issues),
+        "posted_at": dt.date.today().isoformat(),
+        "statuses": ";".join(status_label(i) for i in issues),
+        "body": body,
+    }
+    with _posted_lock:
+        rows = [r for r in _read_posted_rows() if not (r["channel_id"] == channel_id and r["ts"] == ts)]
+        rows.append(row)
+        _write_posted_rows(rows)
+
+
+def status_text(issues, body=""):
+    """Message text with status prefix. Single issue + body: "[STATUS] body";
+    otherwise one "[STATUS] link" line per issue."""
+    if body and len(issues) == 1:
+        return f"[{status_label(issues[0])}] {body}"
+    return "\n".join(f"[{status_label(i)}] {issue_link(i)}" for i in issues)
+
+
+def issue_ids_in_text(text):
+    """Redmine issue ids linked in a Slack message, in order, de-duplicated."""
+    seen, ids = set(), []
+    for m in _ISSUE_URL.finditer(text or ""):
+        i = int(m.group(1))
+        if i not in seen:
+            seen.add(i)
+            ids.append(i)
+    return ids
+
+
+def refresh_tracked_messages(client):
+    """Daily job: re-read Redmine for every tracked message, edit those whose status changed."""
+    cutoff = (dt.date.today() - dt.timedelta(days=STATUS_TRACK_DAYS)).isoformat()
+    with _posted_lock:
+        rows = _read_posted_rows()
+    keep, edited = [], 0
+    for r in rows:
+        if r["posted_at"] < cutoff:
+            continue  # too old: stop tracking
+        try:
+            issues = [get_issue(int(i)) for i in r["issue_ids"].split(";") if i]
+            issues = [i for i in issues if i]
+            if not issues:
+                continue  # all deleted in Redmine
+            statuses = ";".join(status_label(i) for i in issues)
+            if statuses != r["statuses"]:
+                client.chat_update(channel=r["channel_id"], ts=r["ts"], text=status_text(issues, r["body"]))
+                r["statuses"] = statuses
+                edited += 1
+        except Exception as e:
+            err = getattr(getattr(e, "response", None), "get", lambda k, d=None: d)("error")
+            if err in ("message_not_found", "channel_not_found"):
+                app.logger.info("Stop tracking %s/%s: %s", r["channel_id"], r["ts"], err)
+                continue
+            app.logger.warning("Status refresh failed for %s/%s: %s", r["channel_id"], r["ts"], e)
+        keep.append(r)
+    with _posted_lock:
+        # Merge with rows added while we were running.
+        current = _read_posted_rows()
+        known = {(r["channel_id"], r["ts"]) for r in rows}
+        new_rows = [r for r in current if (r["channel_id"], r["ts"]) not in known]
+        _write_posted_rows(keep + new_rows)
+    app.logger.info("Status refresh: %d tracked, %d edited, %d dropped", len(rows), edited, len(rows) - len(keep))
+
+
+def _seconds_until(hhmm):
+    hour, minute = (int(x) for x in hhmm.split(":"))
+    now = dt.datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += dt.timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+def start_status_scheduler():
+    """Background thread: one refresh at startup, then daily at STATUS_CHECK_TIME."""
+    def loop():
+        time.sleep(30)  # let the Socket Mode connection settle first
+        while True:
+            try:
+                refresh_tracked_messages(app.client)
+            except Exception as e:
+                app.logger.warning("Status refresh crashed: %s", e)
+            time.sleep(_seconds_until(STATUS_CHECK_TIME))
+    threading.Thread(target=loop, name="status-refresh", daemon=True).start()
+
+
 # --- Slack handlers --------------------------------------------------------
 
 @app.shortcut("create_redmine_ticket")
@@ -682,8 +849,6 @@ def handle_submit(ack, view, client, body):
         if not r.ok:
             raise RedmineError(redmine_error_message(r))
         created = r.json()["issue"]
-        issue_id = created["id"]
-        tracker_name = created.get("tracker", {}).get("name", "Ticket")
         project_name = created.get("project", {}).get("name", project_ident)
 
         remembered = False
@@ -694,20 +859,23 @@ def handle_submit(ack, view, client, body):
             except Exception as e:
                 app.logger.warning("Could not save mapping %s -> %s: %s", channel_id, project_ident, e)
 
-        # Same visual format as redmine-ticket-copy-markdown: [Tracker #ID: Subject](url)
-        link = f"<{REDMINE_URL}/issues/{issue_id}|{tracker_name} #{issue_id}: {subject}>"
-        text = msgs["created"].format(link=link, project=project_name)
+        body = msgs["created"].format(link=issue_link(created), project=project_name)
         if remembered:
-            text += msgs["remembered"]
+            body += msgs["remembered"]
         elif not meta["mapped_project"]:
-            text += msgs["unmapped"]
+            body += msgs["unmapped"]
+        text = status_text([created], body)
         try:
-            client.chat_postMessage(
+            posted = client.chat_postMessage(
                 channel=channel_id,
                 thread_ts=msg_ts,
                 text=text,
                 unfurl_links=False,
             )
+            try:
+                remember_posted(channel_id, posted["ts"], [created], body)
+            except Exception as e:
+                app.logger.warning("Could not record posted message for status tracking: %s", e)
         except Exception as e:
             # Ticket exists; make sure the user knows (else they retry -> duplicates).
             app.logger.warning("Post-back to %s failed (%s); notifying user directly", channel_id, e)
@@ -717,5 +885,81 @@ def handle_submit(ack, view, client, body):
         raise
 
 
+@app.shortcut("check_redmine_status")
+def check_status(ack, shortcut, client):
+    """Refresh the "[STATUS]" of every Redmine ticket linked in a message.
+
+    Bot's own message: edited in place. Someone else's message: the bot
+    posts (or updates) one status reply in the thread, since Slack only lets
+    an app edit its own messages. Either way the message is then tracked.
+    """
+    ack()
+    message = shortcut["message"]
+    channel_id, user_id = shortcut["channel"]["id"], shortcut["user"]["id"]
+    msg_ts = message["ts"]
+    thread_ts = message.get("thread_ts") or msg_ts
+    msgs = MESSAGES[DEFAULT_LANGUAGE]
+
+    ids = issue_ids_in_text(message.get("text", ""))
+    if not ids:
+        notify_user(client, channel_id, user_id, thread_ts, msgs["no_link"].format(url=REDMINE_URL), msgs)
+        return
+    try:
+        issues = [i for i in (get_issue(i) for i in ids) if i]
+        if not issues:
+            raise RedmineError(f"issue {ids} not found")
+        auth = _bot_identity(client)
+        own = message.get("bot_id") == auth.get("bot_id") or message.get("user") == auth.get("user_id")
+        if own:
+            # Keep the wording, only swap the prefix (bot's own message).
+            body = _STATUS_PREFIX.sub("", message.get("text", ""), count=1)
+            if len(issues) != 1:
+                body = ""
+            client.chat_update(channel=channel_id, ts=msg_ts, text=status_text(issues, body))
+            remember_posted(channel_id, msg_ts, issues, body)
+        else:
+            text = status_text(issues)
+            reply_ts = _find_status_reply(client, channel_id, thread_ts, auth)
+            if reply_ts:
+                client.chat_update(channel=channel_id, ts=reply_ts, text=text)
+            else:
+                reply_ts = client.chat_postMessage(
+                    channel=channel_id, thread_ts=thread_ts, text=text, unfurl_links=False
+                )["ts"]
+            remember_posted(channel_id, reply_ts, issues)
+        summary = ", ".join(f"#{i['id']} {status_label(i)}" for i in issues)
+        notify_user(client, channel_id, user_id, thread_ts, msgs["status_updated"].format(summary=summary), msgs)
+    except Exception as e:
+        notify_user(client, channel_id, user_id, thread_ts, msgs["status_failed"].format(error=e), msgs)
+        raise
+
+
+def _bot_identity(client):
+    return _cached("bot_identity", lambda: client.auth_test().data)
+
+
+def _find_status_reply(client, channel_id, thread_ts, auth):
+    """ts of the bot's existing status reply in a thread, or None.
+
+    Needs channels:history / groups:history; without them a new reply is posted.
+    """
+    try:
+        replies = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=200)["messages"]
+    except Exception as e:
+        app.logger.info("Cannot read thread %s/%s (%s); posting a new status reply", channel_id, thread_ts, e)
+        return None
+    for m in replies:
+        if m.get("ts") == thread_ts:
+            continue
+        is_bot = m.get("bot_id") == auth.get("bot_id") or m.get("user") == auth.get("user_id")
+        if is_bot and _STATUS_PREFIX.match(m.get("text", "")) and issue_ids_in_text(m.get("text", "")):
+            # A status reply is only "[STATUS] link" lines (no "created" wording).
+            if all(_STATUS_PREFIX.match(line) for line in m["text"].splitlines() if line.strip()) \
+                    and not any(marker in m["text"] for marker in _CREATED_MARKERS):
+                return m["ts"]
+    return None
+
+
 if __name__ == "__main__":
+    start_status_scheduler()
     SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()

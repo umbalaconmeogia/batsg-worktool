@@ -1,4 +1,6 @@
 {
   "default_project": "general",
-  "default_language": "vi"
+  "default_language": "vi",
+  "status_check_time": "07:00",
+  "status_track_days": 90
 }
