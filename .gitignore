@@ -1,6 +1,8 @@
 # Environment-specific / secret files — never commit
 .env
 src/slack-redmine/config.json
+src/slack-redmine/slack-redmine-mapping.csv
+src/slack-redmine/slack-redmine-mapping.csv.tmp
 
 # Python
 __pycache__/

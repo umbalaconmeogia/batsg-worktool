@@ -2,7 +2,7 @@
 
 Slack app tạo Redmine ticket từ một message trong Slack.
 
-Chọn một message → `⋮` (More actions) → **Create Redmine ticket** → modal hiện ra với Subject/Description prefill từ nội dung message (sửa được), chọn Tracker và Assignee → Submit → issue được tạo trong Redmine project tương ứng với channel, và link ticket được post lại vào thread của message gốc:
+Chọn một message → `⋮` (More actions) → **Create Redmine ticket** → modal hiện ra: Tracker, Subject/Description prefill từ nội dung message (sửa được), Assignee, và ở gần cuối là Project (chọn sẵn project map với channel, đổi được khi cần) → Submit → issue được tạo trong project đã chọn, và link ticket được post lại vào thread của message gốc:
 
 > Đã tạo Redmine ticket [Feature #21814: Subject của ticket](https://redmine.example.com/issues/21814) trong project **Project Name**
 
@@ -57,13 +57,15 @@ Cách nhanh: chọn **From a manifest**, dán nội dung [slack-app-manifest.yml
 1. **Settings → Socket Mode** → gạt **Enable Socket Mode** → dialog hiện ra yêu cầu tạo App-Level Token (scope `connections:write` có sẵn) → Generate → copy token `xapp-...` (điền vào `SLACK_APP_TOKEN`; token chỉ hiện một lần, xem lại ở Basic Information → App-Level Tokens).
 2. **OAuth & Permissions** → Install to Workspace, lấy Bot Token `xoxb-...` (điền vào `SLACK_BOT_TOKEN`).
 3. `/invite` bot vào các channel muốn dùng (cần để bot post được vào thread).
+   - Scope `channels:read` + `groups:read` chỉ để app ghi tên channel vào cột `channel_name` của file mapping; thiếu thì cột đó để trống, app vẫn chạy.
+   - **Quên invite** (nhất là channel private): ticket vẫn được tạo nhưng bot không post được vào thread (`channel_not_found`), cũng không gửi được ephemeral. Khi đó app nhắn DM cho người tạo, kèm link ticket và nhắc invite bot. DM cần scope `im:write` (có sẵn trong manifest; app tạo trước khi có scope này thì thêm ở OAuth & Permissions rồi **Reinstall to Workspace**). Không có scope thì chỉ ghi log.
 
 <details>
 <summary>Cấu hình tay (nếu không dùng manifest — chọn Blank app)</summary>
 
 1. **Interactivity & Shortcuts**: bật Interactivity, tạo Shortcut loại *On messages*, callback ID: `create_redmine_ticket`.
 2. **Socket Mode**: bật, tạo App-Level Token với scope `connections:write` (token `xapp-...`).
-3. **OAuth & Permissions** — thêm Bot Token Scopes: `commands`, `chat:write`, `users:read`, `users:read.email` → Install to Workspace, lấy Bot Token (`xoxb-...`).
+3. **OAuth & Permissions** — thêm Bot Token Scopes: `commands`, `chat:write`, `users:read`, `users:read.email`, `im:write`, `channels:read`, `groups:read` → Install to Workspace, lấy Bot Token (`xoxb-...`).
 4. `/invite` bot vào các channel muốn dùng.
 
 </details>
@@ -72,26 +74,35 @@ Cách nhanh: chọn **From a manifest**, dán nội dung [slack-app-manifest.yml
 
 ```bash
 cp .env.example .env          # điền token Slack, URL + API key Redmine
-cp config.json.example config.json   # điền mapping channel ID -> project identifier
+cp config.json.example config.json   # default project / ngôn ngữ
 ```
 
-Lấy Slack channel ID: right-click channel → View channel details → cuối popup.
-
-`config.json`:
+`config.json` — setting tĩnh, người sửa tay, đổi xong cần restart:
 
 ```json
 {
-  "slack_channel_redmine_project_map": {
-    "C0123456789": { "project": "project-a", "note": "#dev-team" },
-    "C0987654321": "project-b"
-  },
-  "default_project": "general"
+  "default_project": "general",
+  "default_language": "vi"
 }
 ```
 
-Value có thể là project identifier trực tiếp, hoặc object `{ "project": ..., "note": ... }` — `note` là ghi chú tự do (thường ghi tên channel, vì channel ID nhìn không ra là channel nào), app bỏ qua field này.
+- `default_project`: project chọn sẵn trong modal khi channel chưa được map. Để `null` thì modal mở ra với ô Project trống, người dùng phải tự chọn.
+- `default_language`: ngôn ngữ mặc định của message bot post lại vào thread — `vi` (tiếng Việt, mặc định) hoặc `ja` (tiếng Nhật). Người dùng đổi được cho từng ticket bằng ô **Reply language** ở cuối modal.
 
-Channel không có trong map sẽ dùng `default_project` (message post lại sẽ ghi chú "channel này chưa được map project"). Để `default_project` là `null` nếu muốn từ chối các channel chưa map.
+`slack-redmine-mapping.csv` — mapping Slack channel → Redmine project. **App tự ghi file này**, không cần tạo trước:
+
+```csv
+channel_id,project,channel_name,note
+C0123456789,project-a,dev-team,Ghi chú tuỳ ý
+C0987654321,project-b,,
+```
+
+- `channel_id`: Slack channel ID (right-click channel → View channel details → cuối popup). `project`: Redmine project identifier. `channel_name`: app tự điền tên channel khi ghi (cần scope `channels:read`/`groups:read`, thiếu thì để trống). `note`: ghi chú tự do của người, app không bao giờ sửa.
+- **Cách thêm mapping thông thường**: trong channel đó, tạo ticket → ở modal chọn Project mong muốn (dropdown liệt kê mọi project có trong Redmine) → tích **Remember this project for this channel** → Create. App ghi vào CSV ngay, lần sau modal chọn sẵn project đó. Muốn đổi project của channel thì làm y như vậy với project khác.
+- Sửa tay file CSV cũng được (Excel, editor); app đọc lại file mỗi lần mở modal nên **không cần restart**.
+- Nâng cấp từ bản cũ: nếu `config.json` còn key `slack_channel_redmine_project_map` và chưa có CSV, app tự chuyển sang CSV lúc khởi động và ghi log; sau đó xoá key đó khỏi `config.json` (còn để thì app bỏ qua và cảnh báo mỗi lần start).
+
+**Custom field bắt buộc**: project nào có custom field đánh dấu *Required* (ví dụ *Acceptance Criteria*) thì modal tự thêm ô nhập cho field đó, nếu không Redmine sẽ từ chối tạo ticket (422). Cần API key admin để app đọc được định nghĩa custom field (`/custom_fields.json`); key thường thì modal không hiện ô này và tạo ticket sẽ báo lỗi kèm lý do từ Redmine. Hỗ trợ các kiểu text, string, int, float, link, list, enumeration, bool, date; kiểu user/version/attachment thì bỏ qua. Ô nhập luôn là bắt buộc trong modal (modal không đổi được theo tracker đang chọn); field chỉ dùng cho một số tracker thì có hint "Used by tracker: ...", chọn tracker khác thì Redmine bỏ qua giá trị đó.
 
 ## Chạy
 
@@ -219,9 +230,11 @@ Lưu ý:
 
 ## Giới hạn hiện tại (phase 1)
 
-- Priority/status/custom field: dùng default của Redmine project.
+- Priority/status và custom field không bắt buộc: dùng default của Redmine project.
+- Custom field bắt buộc kiểu user/version/attachment chưa hỗ trợ trong modal → Redmine sẽ báo lỗi.
 - Assignee dropdown lấy tối đa 100 member đầu của project (giới hạn của Slack static_select).
-- Message text đưa vào Description là raw Slack mrkdwn (mention dạng `<@U123>`...) — tự sửa trong modal nếu cần.
-- Sửa `config.json` xong cần restart app.
+- Message text đưa vào Subject/Description là raw Slack mrkdwn, chỉ mention user (`<@U123>`) được bỏ đi; `<!here>`, link dạng `<url|text>`, emoji `:x:` giữ nguyên — tự sửa trong modal nếu cần.
+- Sửa `config.json` xong cần restart app (`slack-redmine-mapping.csv` thì không).
+- Dropdown Project liệt kê mọi project active mà API key thấy được, không lọc theo quyền của người tạo; chọn project mình không phải member thì ticket đứng tên user của API key (fallback impersonation).
 
 Hướng mở rộng: xem mục 9 trong [docs/spec.md](../../docs/spec.md).

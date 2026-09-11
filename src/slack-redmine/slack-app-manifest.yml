@@ -20,6 +20,9 @@ oauth_config:
       - chat:write
       - users:read
       - users:read.email
+      - im:write
+      - channels:read
+      - groups:read
 settings:
   interactivity:
     is_enabled: true

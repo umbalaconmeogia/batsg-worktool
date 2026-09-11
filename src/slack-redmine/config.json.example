@@ -1,8 +1,4 @@
 {
-  "slack_channel_redmine_project_map": {
-    "C0123456789": { "project": "project-a", "note": "#dev-team" },
-    "C0987654321": { "project": "project-b", "note": "#customer-support, thêm 2026-09" },
-    "C0555555555": "project-c"
-  },
-  "default_project": "general"
+  "default_project": "general",
+  "default_language": "vi"
 }
