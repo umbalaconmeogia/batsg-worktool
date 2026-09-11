@@ -2,9 +2,9 @@
 
 Slack app tạo Redmine ticket từ một message trong Slack.
 
-Chọn một message → `⋮` (More actions) → **Create Redmine ticket** → modal hiện ra: Tracker, Subject/Description prefill từ nội dung message (sửa được), Assignee, và ở gần cuối là Project (chọn sẵn project map với channel, đổi được khi cần) → Submit → issue được tạo trong project đã chọn, và link ticket được post lại vào thread của message gốc:
+Chọn một message → `⋮` (More actions) → **Create Redmine ticket** → modal hiện ra: Tracker, Subject/Description prefill từ nội dung message (sửa được), Assignee, và ở gần cuối là Priority, Project (chọn sẵn project map với channel, đổi được khi cần) → Submit → issue được tạo trong project đã chọn, và link ticket được post lại vào thread của message gốc:
 
-> [NEW] [Feature #21814: Subject của ticket](https://redmine.example.com/issues/21814) — ticket đã được tạo trong project **Project Name**
+> [NEW] [Feature #21814: Subject của ticket](https://redmine.example.com/issues/21814) — ticket được tạo bởi @Tên User trong project **Project Name**
 
 Tiền tố `[NEW]` là status hiện tại của ticket trên Redmine. Mỗi ngày một lần app kiểm tra lại Redmine và sửa tiền tố khi status đổi (`[IN PROGRESS]`, `[CLOSED]`...), nên nhìn Slack là biết ticket xong chưa mà không cần mở Redmine. Muốn cập nhật ngay: chọn message → `⋮` → **Check Redmine status** (dùng được với cả message do người viết có chứa link Redmine; khi đó bot post một reply status trong thread).
 
@@ -240,7 +240,7 @@ Lưu ý:
 
 ## Giới hạn hiện tại (phase 1)
 
-- Priority/status và custom field không bắt buộc: dùng default của Redmine project.
+- Status và custom field không bắt buộc: dùng default của Redmine project. Priority chọn được trong modal (chọn sẵn default của Redmine).
 - Custom field bắt buộc kiểu user/version/attachment chưa hỗ trợ trong modal → Redmine sẽ báo lỗi.
 - Assignee dropdown lấy tối đa 100 member đầu của project (giới hạn của Slack static_select).
 - Message text đưa vào Subject/Description là raw Slack mrkdwn, chỉ mention user (`<@U123>`) được bỏ đi; `<!here>`, link dạng `<url|text>`, emoji `:x:` giữ nguyên — tự sửa trong modal nếu cần.

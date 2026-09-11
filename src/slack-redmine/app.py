@@ -54,7 +54,8 @@ STATUS_TRACK_DAYS = int(_config.get("status_track_days", 90))   # stop tracking 
 # selector (last field) whose initial value is this; "vi" if unset/unknown.
 MESSAGES = {
     "vi": {
-        "created": "{link} — ticket đã được tạo trong project *{project}*",
+        "created": "{link} — ticket được tạo bởi {user} trong project *{project}*",
+        "created_marker": "ticket được tạo bởi",
         "unmapped": " (channel này chưa được map project)",
         "remembered": " (đã ghi nhớ project này cho channel)",
         "failed": "⚠️ Tạo ticket Redmine thất bại: {error}",
@@ -65,7 +66,8 @@ MESSAGES = {
         "status_failed": "⚠️ Kiểm tra status thất bại: {error}",
     },
     "ja": {
-        "created": "{link} — チケットをプロジェクト *{project}* に作成しました",
+        "created": "{link} — {user} がチケットをプロジェクト *{project}* に作成しました",
+        "created_marker": "がチケットをプロジェクト",
         "unmapped": "（このチャンネルはプロジェクトにマッピングされていません）",
         "remembered": "（このチャンネルのプロジェクトとして記憶しました）",
         "failed": "⚠️ Redmineチケットの作成に失敗しました: {error}",
@@ -230,6 +232,17 @@ def issue_link(issue):
 
 def status_label(issue):
     return issue.get("status", {}).get("name", "?").upper()
+
+
+def get_priorities():
+    """Active issue priorities (id, name, is_default), [] if the enumeration is unavailable."""
+    def fetch():
+        try:
+            data = redmine_get("/enumerations/issue_priorities.json")
+        except requests.HTTPError:
+            return []
+        return [p for p in data.get("issue_priorities", []) if p.get("active", True)]
+    return _cached("priorities", fetch)
 
 
 def get_projects():
@@ -460,7 +473,7 @@ def project_block(projects, initial_ident, mapped_ident):
     }
 
 
-def build_view(client, meta, project_ident, subject=None, description=None, remember=False):
+def build_view(client, meta, project_ident, subject=None, description=None, remember=False, priority=None):
     """The ticket modal for one project. meta is the private_metadata dict.
 
     subject/description: current values to keep when the modal is rebuilt
@@ -546,6 +559,25 @@ def build_view(client, meta, project_ident, subject=None, description=None, reme
         if block:
             blocks.append(block)
 
+    priorities = get_priorities()
+    if priorities:
+        priority_options = [{"text": plain(p["name"]), "value": str(p["id"])} for p in priorities]
+        priority_element = {"type": "static_select", "action_id": "v", "options": priority_options}
+        default_priority = next((p for p in priorities if p.get("is_default")), None)
+        if priority is not None:
+            initial = next((o for o in priority_options if o["value"] == str(priority)), None)
+        else:
+            initial = next((o for o in priority_options if default_priority and o["value"] == str(default_priority["id"])), None)
+        if initial:
+            priority_element["initial_option"] = initial
+        blocks.append({
+            "type": "input",
+            "block_id": "priority",
+            "optional": True,
+            "label": plain("Priority"),
+            "element": priority_element,
+        })
+
     blocks.append(project_block(projects, project_ident, meta["mapped_project"]))
 
     # Checkbox right under the Project dropdown, no label of its own. An
@@ -624,8 +656,8 @@ POSTED_PATH = APP_DIR / "posted-messages.csv"
 POSTED_FIELDS = ["channel_id", "ts", "issue_ids", "posted_at", "statuses", "body"]
 _posted_lock = threading.Lock()
 _STATUS_PREFIX = re.compile(r"^\[[^\]\n]+\] ")
-# Wording that only "ticket created" messages contain (text between {link} and {project}).
-_CREATED_MARKERS = [m["created"].split("{link}")[1].split("{project}")[0].strip() for m in MESSAGES.values()]
+# Wording that only "ticket created" messages contain (never in a status reply).
+_CREATED_MARKERS = [m["created_marker"] for m in MESSAGES.values()]
 _ISSUE_URL = re.compile(re.escape(REDMINE_URL) + r"/issues/(\d+)")
 
 
@@ -771,6 +803,7 @@ def change_project(ack, body, client):
             subject=view_field(view, "subject"),
             description=view_field(view, "description"),
             remember=bool(view_field(view, "remember")),
+            priority=view_field(view, "priority"),
         ),
     )
 
@@ -812,6 +845,8 @@ def handle_submit(ack, view, client, body):
         issue["tracker_id"] = int(field("tracker"))
     if field("assignee"):
         issue["assigned_to_id"] = int(field("assignee"))
+    if field("priority"):
+        issue["priority_id"] = int(field("priority"))
     custom_fields = [
         {"id": int(block_id[len("cf_"):]), "value": field(block_id)}
         for block_id in values if block_id.startswith("cf_") and field(block_id) not in (None, "", [])
@@ -859,7 +894,7 @@ def handle_submit(ack, view, client, body):
             except Exception as e:
                 app.logger.warning("Could not save mapping %s -> %s: %s", channel_id, project_ident, e)
 
-        body = msgs["created"].format(link=issue_link(created), project=project_name)
+        body = msgs["created"].format(link=issue_link(created), user=f"<@{user_id}>", project=project_name)
         if remembered:
             body += msgs["remembered"]
         elif not meta["mapped_project"]:

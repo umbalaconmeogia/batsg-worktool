@@ -10,7 +10,8 @@ Pattern tham khảo: GitHub official Slack integration ("⋮ → Create an Issue
 
 1. Người dùng bấm `⋮` (More actions) trên message → chọn shortcut **Create Redmine ticket**.
 2. App mở modal với các field:
-   - Dòng context đầu modal: `Redmine project: *tên*` (chỉ đọc, cập nhật khi đổi project). Các ô theo thứ tự: Tracker, Subject, Description, Assignee, custom field bắt buộc, **Project**, checkbox Remember, Reply language — Project và Remember để gần cuối vì ít dùng (chỉ khi channel chưa map). Slack không hỗ trợ xếp hai `input` trên cùng một hàng.
+   - Dòng context đầu modal: `Redmine project: *tên*` (chỉ đọc, cập nhật khi đổi project). Các ô theo thứ tự: Tracker, Subject, Description, Assignee, custom field bắt buộc, Priority, **Project**, checkbox Remember, Reply language — Project và Remember để gần cuối vì ít dùng (chỉ khi channel chưa map). Slack không hỗ trợ xếp hai `input` trên cùng một hàng.
+   - **Priority** (dropdown, optional, ngay trên Project): danh sách từ `GET /enumerations/issue_priorities.json` (active), chọn sẵn priority `is_default` của Redmine. Giữ nguyên khi đổi project. Không lấy được enumeration → không hiện ô, Redmine dùng default.
    - **Project** (dropdown, `block_id` = `project`, `dispatch_action`): liệt kê mọi project active từ `GET /projects.json` (phân trang, cache), sắp xếp theo tên; ≤100 project dùng `static_select`, nhiều hơn dùng `external_select` (options handler lọc theo query). Chọn sẵn project map với channel (từ `slack-redmine-mapping.csv`), channel chưa map thì `default_project`, không có thì để trống; hint ghi rõ trạng thái map. Đổi project → app nhận `block_actions`, gọi `views.update` dựng lại modal cho project mới (tracker, assignee, custom field), giữ nguyên Subject/Description/checkbox người dùng đã sửa.
    - **Tracker** (dropdown): danh sách tracker của project, lấy từ Redmine API; default là tracker đầu tiên.
    - Trước khi prefill, message text được bỏ các mention user Slack (`<@U123>`, `<@U123|name>`) — Redmine không hiểu, và chúng hay đứng đầu message làm Subject xấu; khoảng trắng thừa và dòng trống đầu bị dọn. Các markup khác (`<!here>`, `<url|text>`, emoji `:x:`) giữ nguyên.
@@ -31,8 +32,10 @@ Pattern tham khảo: GitHub official Slack integration ("⋮ → Create an Issue
 
 4. App post message vào thread của message gốc:
 
-   > [STATUS] [Tracker #ID: Subject](url) — ticket đã được tạo trong project **ProjectName**
-   > (ja: [STATUS] [Tracker #ID: Subject](url) — チケットをプロジェクト **ProjectName** に作成しました)
+   > [STATUS] [Tracker #ID: Subject](url) — ticket được tạo bởi @user trong project **ProjectName**
+   > (ja: [STATUS] [Tracker #ID: Subject](url) — @user がチケットをプロジェクト **ProjectName** に作成しました)
+
+   - `@user` là mention Slack (`<@U...>`) của người bấm submit.
 
    - `[STATUS]` = tên status của ticket trên Redmine viết hoa (`[NEW]`, `[IN PROGRESS]`, `[CLOSED]`...), không ánh xạ sang chữ khác. Được cập nhật về sau, xem mục 2b.
 
